@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,14 +12,60 @@ except ModuleNotFoundError:
     st.code("streamlit\npandas\nnumpy\nplotly", language="text")
     st.stop()
 
+
+# -----------------------------
+# Settings
+# -----------------------------
 st.set_page_config(page_title="3D Point Space Explorer", layout="wide")
 
+DEFAULT_FILE = Path("default_data.csv")
+
+
+def get_admin_password():
+    """
+    Password source:
+    1. Streamlit secrets: ADMIN_PASSWORD
+    2. Environment variable: ADMIN_PASSWORD
+    3. Fallback: change-me
+    """
+    try:
+        return st.secrets.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", "change-me"))
+    except Exception:
+        return os.environ.get("ADMIN_PASSWORD", "change-me")
+
+
+def load_default_data():
+    if DEFAULT_FILE.exists():
+        return pd.read_csv(DEFAULT_FILE)
+
+    return pd.DataFrame({
+        "ticker": ["AAPL", "MSFT", "GOOG"],
+        "sector": ["Technology", "Technology", "Communication Services"],
+        "consistencyscoreadjusted": [0.82, 0.77, 0.70],
+        "mktcap": [3000000000000, 2800000000000, 2200000000000],
+        "averagepositive": [0.55, 0.50, 0.48],
+        "averagepositivecfos": [0.61, 0.58, 0.54],
+    })
+
+
+def save_default_data(df):
+    df.to_csv(DEFAULT_FILE, index=False)
+
+
+# -----------------------------
+# Title
+# -----------------------------
 st.title("3D / 4D Point Space Explorer")
+
 st.write(
     "Upload a CSV, choose whether the first row is headers, edit the data, "
     "then map numeric columns into 3D space. Text columns like ticker can be used as labels."
 )
 
+
+# -----------------------------
+# Upload / default data
+# -----------------------------
 uploaded = st.file_uploader("Upload CSV", type=["csv"])
 
 first_row_headers = st.checkbox("First row contains column names", value=True)
@@ -27,21 +76,20 @@ if uploaded is not None:
         df = pd.read_csv(uploaded)
     else:
         df = pd.read_csv(uploaded, header=None)
+
         if first_col_id:
             df.columns = ["ticker"] + [f"var{i}" for i in range(1, df.shape[1])]
         else:
             df.columns = [f"var{i}" for i in range(1, df.shape[1] + 1)]
 else:
-    df = pd.DataFrame({
-        "ticker": ["AAPL", "MSFT", "GOOG"],
-        "sector": ["Technology", "Technology", "Communication Services"],
-        "consistencyscoreadjusted": [0.82, 0.77, 0.70],
-        "mktcap": [3000000000000, 2800000000000, 2200000000000],
-        "averagepositive": [0.55, 0.50, 0.48],
-        "averagepositivecfos": [0.61, 0.58, 0.54],
-    })
+    df = load_default_data()
 
+
+# -----------------------------
+# Data editor
+# -----------------------------
 st.subheader("Data")
+
 df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
 # Keep obvious ID/text columns as text. Convert the rest to numeric only when possible.
@@ -60,6 +108,41 @@ for col in df.columns:
 if "mktcap" in df.columns and pd.api.types.is_numeric_dtype(df["mktcap"]):
     df["log_mktcap"] = np.log1p(df["mktcap"].clip(lower=0))
 
+
+# -----------------------------
+# Admin: save current data as default
+# -----------------------------
+with st.expander("Admin: save current table as default data"):
+    st.write(
+        "Enter the admin password to save the current edited/uploaded table as the default dataset."
+    )
+
+    password_input = st.text_input("Admin password", type="password")
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        if st.button("Save current table as default"):
+            if password_input == get_admin_password():
+                save_default_data(df)
+                st.success("Saved current table as default_data.csv.")
+            else:
+                st.error("Wrong password. Default data was not changed.")
+
+    with col_b:
+        st.download_button(
+            "Download current table as default_data.csv",
+            df.to_csv(index=False),
+            file_name="default_data.csv",
+            mime="text/csv",
+        )
+
+    st.caption(
+        "Important: on Streamlit Cloud, files saved by the running app may reset after reboot/redeploy. "
+        "For a permanent default, download default_data.csv and upload it to your GitHub repo."
+    )
+
+
 numeric_cols = df.select_dtypes(include="number").columns.tolist()
 all_cols = df.columns.tolist()
 text_cols = [c for c in all_cols if c not in numeric_cols]
@@ -68,14 +151,20 @@ if len(numeric_cols) < 3:
     st.warning("You need at least 3 numeric columns for a 3D chart.")
     st.stop()
 
+
+# -----------------------------
+# Chart controls
+# -----------------------------
 st.subheader("Chart controls")
 
 c1, c2, c3 = st.columns(3)
 
 with c1:
     x_col = st.selectbox("X axis", numeric_cols)
+
 with c2:
     y_col = st.selectbox("Y axis", numeric_cols, index=1 if len(numeric_cols) > 1 else 0)
+
 with c3:
     z_col = st.selectbox("Z axis", numeric_cols, index=2 if len(numeric_cols) > 2 else 0)
 
@@ -96,7 +185,9 @@ with c6:
     label_col = st.selectbox(
         "Point label",
         ["None"] + text_cols,
-        index=(["None"] + text_cols).index(default_label) if default_label in (["None"] + text_cols) else 0,
+        index=(["None"] + text_cols).index(default_label)
+        if default_label in (["None"] + text_cols)
+        else 0,
     )
 
 with c7:
@@ -106,6 +197,10 @@ with c7:
         help="If off, labels still appear when you hover.",
     )
 
+
+# -----------------------------
+# Build plot data
+# -----------------------------
 plot_df = df.dropna(subset=[x_col, y_col, z_col]).copy()
 
 if plot_df.empty:
@@ -113,17 +208,24 @@ if plot_df.empty:
     st.stop()
 
 size_arg = None
+
 if size_col != "None":
     plot_df["_size"] = pd.to_numeric(plot_df[size_col], errors="coerce").fillna(0).clip(lower=0)
+
     if plot_df["_size"].max() > 0:
         size_arg = "_size"
 
 hover_name = None
+
 if label_col != "None":
     hover_name = label_col
 elif "ticker" in plot_df.columns:
     hover_name = "ticker"
 
+
+# -----------------------------
+# 3D chart
+# -----------------------------
 fig = px.scatter_3d(
     plot_df,
     x=x_col,
@@ -148,6 +250,10 @@ fig.update_layout(height=750)
 
 st.plotly_chart(fig, use_container_width=True)
 
+
+# -----------------------------
+# Downloads
+# -----------------------------
 st.download_button(
     "Download edited CSV",
     df.to_csv(index=False),
